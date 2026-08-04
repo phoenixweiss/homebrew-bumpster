@@ -8,9 +8,12 @@ Official Homebrew tap for [Bumpster](https://github.com/phoenixweiss/Bumpster).
 brew install phoenixweiss/bumpster/bumpster
 ```
 
-After the tap has been added, the short command also works:
+The fully qualified command trusts only the selected Formula. To use the short
+name, add the tap and explicitly trust the Bumpster Formula first:
 
 ```sh
+brew tap phoenixweiss/bumpster
+brew trust --formula phoenixweiss/bumpster/bumpster
 brew install bumpster
 ```
 
