@@ -1,0 +1,339 @@
+name: Update Formula
+
+on:
+  repository_dispatch:
+    types:
+      - bumpster-release
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable Bumpster release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-formula
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Prepare Formula pull request
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - name: Check automation token
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            printf 'HOMEBREW_TAP_TOKEN is not configured.\n' >&2
+            exit 1
+          fi
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@fd832223f9f99ebf0244dd20658680e5d4aca049 # 2026.08.03.2
+        with:
+          stable: true
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Install Homebrew Bundler RubyGems
+        run: brew install-bundler-gems
+
+      - name: Validate stable release
+        id: release
+        shell: bash
+        env:
+          DISPATCH_COMMIT: ${{ github.event.client_payload.commit || '' }}
+          DISPATCH_REPOSITORY: ${{ github.event.client_payload.repository || 'phoenixweiss/Bumpster' }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          SOURCE_REPOSITORY: phoenixweiss/Bumpster
+        run: |
+          if [[ "$DISPATCH_REPOSITORY" != "$SOURCE_REPOSITORY" ]]; then
+            printf 'Unexpected source repository: %s\n' "$DISPATCH_REPOSITORY" >&2
+            exit 1
+          fi
+
+          if [[ ! "$DISPATCH_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            printf 'Release tag must match vX.Y.Z: %s\n' "$DISPATCH_TAG" >&2
+            exit 1
+          fi
+
+          version="${BASH_REMATCH[1]}"
+          archive="bumpster-$version.tar.gz"
+          assets_dir="$RUNNER_TEMP/release-assets"
+          mkdir -p "$assets_dir"
+
+          gh api \
+            "repos/$SOURCE_REPOSITORY/releases/tags/$DISPATCH_TAG" \
+            > "$RUNNER_TEMP/release.json"
+
+          gh api \
+            "repos/$SOURCE_REPOSITORY/git/ref/tags/$DISPATCH_TAG" \
+            > "$RUNNER_TEMP/tag-ref.json"
+
+          tag_object_type="$(jq -r '.object.type' "$RUNNER_TEMP/tag-ref.json")"
+          tag_object_sha="$(jq -r '.object.sha' "$RUNNER_TEMP/tag-ref.json")"
+          if [[ "$tag_object_type" == "tag" ]]; then
+            gh api \
+              "repos/$SOURCE_REPOSITORY/git/tags/$tag_object_sha" \
+              > "$RUNNER_TEMP/tag.json"
+            tag_object_type="$(jq -r '.object.type' "$RUNNER_TEMP/tag.json")"
+            tag_object_sha="$(jq -r '.object.sha' "$RUNNER_TEMP/tag.json")"
+          fi
+
+          if [[ "$tag_object_type" != "commit" ]]; then
+            printf 'Release tag does not resolve to a commit.\n' >&2
+            exit 1
+          fi
+
+          release_commit="$(jq -r '.target_commitish' "$RUNNER_TEMP/release.json")"
+          if [[ "$release_commit" != "$tag_object_sha" ]]; then
+            printf 'Release target does not match the release tag.\n' >&2
+            exit 1
+          fi
+
+          if [[ -n "$DISPATCH_COMMIT" && "$DISPATCH_COMMIT" != "$tag_object_sha" ]]; then
+            printf 'Dispatched commit does not match the release tag.\n' >&2
+            exit 1
+          fi
+
+          jq -e \
+            --arg archive "$archive" \
+            --arg tag "$DISPATCH_TAG" \
+            '
+              .draft == false and
+              .prerelease == false and
+              .tag_name == $tag and
+              (.assets | length) == 2 and
+              all(.assets[];
+                .state == "uploaded" and
+                .size > 0 and
+                (.digest | startswith("sha256:"))
+              ) and
+              (
+                [.assets[].name] | sort
+              ) ==
+              (
+                ["SHA256SUMS", $archive] | sort
+              )
+            ' \
+            "$RUNNER_TEMP/release.json" >/dev/null
+
+          gh release download \
+            "$DISPATCH_TAG" \
+            --repo "$SOURCE_REPOSITORY" \
+            --pattern "$archive" \
+            --pattern SHA256SUMS \
+            --dir "$assets_dir"
+
+          actual_assets="$({
+            find "$assets_dir" -maxdepth 1 -type f -exec basename {} \;
+          } | LC_ALL=C sort)"
+          expected_assets="$(printf '%s\n' SHA256SUMS "$archive" | LC_ALL=C sort)"
+
+          if [[ "$actual_assets" != "$expected_assets" ]]; then
+            printf 'Downloaded asset list does not match the whitelist.\n' >&2
+            printf '%s\n' "$actual_assets" >&2
+            exit 1
+          fi
+
+          checksum="$({
+            awk -v archive="$archive" '
+              $2 == archive && $1 ~ /^[0-9a-f]{64}$/ {
+                print $1
+                found += 1
+              }
+              END {
+                if (found != 1) {
+                  exit 1
+                }
+              }
+            ' "$assets_dir/SHA256SUMS"
+          })"
+
+          if [[ "$(<"$assets_dir/SHA256SUMS")" != "$checksum  $archive" ]]; then
+            printf 'SHA256SUMS contains unexpected data.\n' >&2
+            exit 1
+          fi
+
+          (
+            cd "$assets_dir"
+            shasum -a 256 -c SHA256SUMS
+          )
+
+          api_digest="$(
+            jq -r \
+              --arg archive "$archive" \
+              '.assets[] | select(.name == $archive) | .digest' \
+              "$RUNNER_TEMP/release.json"
+          )"
+          if [[ "$api_digest" != "sha256:$checksum" ]]; then
+            printf 'Release asset digest does not match SHA256SUMS.\n' >&2
+            exit 1
+          fi
+
+          expected_contents="$({
+            printf '%s\n' \
+              "bumpster-$version/" \
+              "bumpster-$version/LICENSE" \
+              "bumpster-$version/VERSION" \
+              "bumpster-$version/bumpster.sh" \
+              "bumpster-$version/config.sh" \
+              "bumpster-$version/lib/" \
+              "bumpster-$version/lib/BUMPSTER_LOGO.ASCII" \
+              "bumpster-$version/lib/functions.sh"
+          })"
+          actual_contents="$(tar -tzf "$assets_dir/$archive")"
+
+          if [[ "$actual_contents" != "$expected_contents" ]]; then
+            printf 'Runtime archive contents do not match the whitelist.\n' >&2
+            printf '%s\n' "$actual_contents" >&2
+            exit 1
+          fi
+
+          archive_version="$(
+            tar -xOf \
+              "$assets_dir/$archive" \
+              "bumpster-$version/VERSION"
+          )"
+          if [[ "$archive_version" != "$version" ]]; then
+            printf 'Runtime archive VERSION does not match release tag.\n' >&2
+            exit 1
+          fi
+
+          release_url="$(jq -r '.html_url' "$RUNNER_TEMP/release.json")"
+          asset_url="https://github.com/$SOURCE_REPOSITORY/releases/download/$DISPATCH_TAG/$archive"
+
+          {
+            printf 'archive=%s\n' "$archive"
+            printf 'asset_url=%s\n' "$asset_url"
+            printf 'checksum=%s\n' "$checksum"
+            printf 'release_url=%s\n' "$release_url"
+            printf 'version=%s\n' "$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check Formula version
+        id: formula
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          current_version="$({
+            sed -nE \
+              's#.*releases/download/v([0-9]+\.[0-9]+\.[0-9]+)/bumpster-[^/]+\.tar\.gz.*#\1#p' \
+              Formula/bumpster.rb
+          })"
+
+          if [[ ! "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Cannot read current Formula version.\n' >&2
+            exit 1
+          fi
+
+          comparison="$(
+            brew ruby -e '
+              require "rubygems"
+              puts Gem::Version.new(ARGV[0]) <=> Gem::Version.new(ARGV[1])
+            ' "$current_version" "$VERSION"
+          )"
+
+          if [[ "$comparison" == "0" ]]; then
+            printf 'Formula already points to Bumpster %s.\n' "$VERSION"
+            printf 'skip=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$comparison" != "-1" ]]; then
+            printf 'Refusing Formula downgrade from %s to %s.\n' \
+              "$current_version" \
+              "$VERSION" >&2
+            exit 1
+          fi
+
+          branch="bumpster-$VERSION"
+          existing_pr="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --head "$branch" \
+              --json url \
+              --jq '.[0].url // empty'
+          )"
+          if [[ -n "$existing_pr" ]]; then
+            printf 'Formula update pull request already exists: %s\n' "$existing_pr"
+            printf 'skip=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            printf 'Remote update branch already exists without an open PR: %s\n' \
+              "$branch" >&2
+            exit 1
+          fi
+
+          {
+            printf 'branch=%s\n' "$branch"
+            printf 'skip=false\n'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update Formula
+        if: ${{ steps.formula.outputs.skip != 'true' }}
+        shell: bash
+        env:
+          ASSET_URL: ${{ steps.release.outputs.asset_url }}
+          CHECKSUM: ${{ steps.release.outputs.checksum }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          brew bump-formula-pr \
+            --write-only \
+            --version="$VERSION" \
+            --url="$ASSET_URL" \
+            --sha256="$CHECKSUM" \
+            phoenixweiss/bumpster/bumpster
+
+          if [[ "$(git diff --name-only)" != "Formula/bumpster.rb" ]]; then
+            printf 'Formula update changed unexpected files.\n' >&2
+            git diff --name-only >&2
+            exit 1
+          fi
+
+          git diff --check
+          brew style phoenixweiss/bumpster/bumpster
+          brew audit --strict --online phoenixweiss/bumpster/bumpster
+
+      - name: Open Formula pull request
+        if: ${{ steps.formula.outputs.skip != 'true' }}
+        shell: bash
+        env:
+          BRANCH: ${{ steps.formula.outputs.branch }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$BRANCH"
+          git add Formula/bumpster.rb
+          git commit -m "Update Bumpster to $VERSION"
+          git push origin "$BRANCH"
+
+          {
+            printf 'Updates the Formula for [Bumpster %s](%s).\n\n' \
+              "$VERSION" \
+              "$RELEASE_URL"
+            printf 'The stable Release, runtime asset, checksum, archive contents, '
+            printf 'Formula style, and strict online audit were verified before this PR.\n'
+          } > "$RUNNER_TEMP/pull-request.md"
+
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$BRANCH" \
+            --title "Update Bumpster to $VERSION" \
+            --body-file "$RUNNER_TEMP/pull-request.md"
