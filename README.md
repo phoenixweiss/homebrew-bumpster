@@ -33,3 +33,13 @@ brew uninstall bumpster
 
 The Formula installs only the Bumpster CLI runtime and provides both
 `bumpster` and `bump` commands.
+
+## Author
+
+Created and maintained by [Pavel Tkachev (@phoenixweiss)](https://github.com/phoenixweiss).
+
+## License
+
+This Homebrew tap is available under the [MIT License](LICENSE). Bumpster
+itself is licensed separately in the
+[main repository](https://github.com/phoenixweiss/Bumpster/blob/main/LICENSE).
