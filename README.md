@@ -1,5 +1,7 @@
 # Homebrew Bumpster
 
+[![CI](https://github.com/phoenixweiss/homebrew-bumpster/actions/workflows/ci.yml/badge.svg)](https://github.com/phoenixweiss/homebrew-bumpster/actions/workflows/ci.yml)
+
 Official Homebrew tap for [Bumpster](https://github.com/phoenixweiss/Bumpster).
 
 ## Install

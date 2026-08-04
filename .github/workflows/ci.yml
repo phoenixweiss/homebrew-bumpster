@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  formula:
+    name: Formula (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple Silicon
+            runner: macos-15
+            architecture: arm64
+          - name: Intel
+            runner: macos-15-intel
+            architecture: x86_64
+
+    steps:
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@fd832223f9f99ebf0244dd20658680e5d4aca049 # 2026.08.03.2
+        with:
+          stable: true
+
+      - name: Verify runner architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
+
+      - name: Install Homebrew Bundler RubyGems
+        run: brew install-bundler-gems
+
+      - name: Audit Formula
+        run: brew audit --strict --online phoenixweiss/bumpster/bumpster
+
+      - name: Install Formula
+        run: brew install phoenixweiss/bumpster/bumpster
+
+      - name: Verify installed commands and runtime
+        run: |
+          version="$(brew info --json=v2 phoenixweiss/bumpster/bumpster | jq -r '.formulae[0].versions.stable')"
+          test "$(bumpster --version)" = "Bumpster version: $version"
+          test "$(bump --version)" = "Bumpster version: $version"
+          bumpster --help >/dev/null
+
+          if update_output="$(bumpster --update 2>&1)"
+          then
+            printf 'Homebrew-managed update unexpectedly succeeded.\n' >&2
+            exit 1
+          fi
+          printf '%s\n' "$update_output" |
+            grep -F "Use 'brew upgrade bumpster' to update." >/dev/null
+
+          prefix="$(brew --prefix phoenixweiss/bumpster/bumpster)"
+          actual_runtime="$(
+            find "$prefix/libexec" -type f |
+              sed "s|$prefix/libexec/||" |
+              sort
+          )"
+          expected_runtime="$(
+            printf '%s\n' \
+              VERSION \
+              bumpster.sh \
+              config.sh \
+              lib/BUMPSTER_LOGO.ASCII \
+              lib/functions.sh |
+              sort
+          )"
+
+          test "$actual_runtime" = "$expected_runtime"
+          test -f "$prefix/LICENSE"
+          test -x "$prefix/libexec/bumpster.sh"
+          test -x "$prefix/bin/bumpster"
+          test -L "$prefix/bin/bump"
+
+      - name: Test Formula
+        run: brew test phoenixweiss/bumpster/bumpster
+
+      - name: Uninstall Formula
+        run: |
+          prefix="$(brew --prefix phoenixweiss/bumpster/bumpster)"
+          brew uninstall bumpster
+          test ! -e "$prefix"
