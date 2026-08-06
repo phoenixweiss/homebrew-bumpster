@@ -288,11 +288,9 @@ jobs:
         env:
           ASSET_URL: ${{ steps.release.outputs.asset_url }}
           CHECKSUM: ${{ steps.release.outputs.checksum }}
-          VERSION: ${{ steps.release.outputs.version }}
         run: |
           brew bump-formula-pr \
             --write-only \
-            --version="$VERSION" \
             --url="$ASSET_URL" \
             --sha256="$CHECKSUM" \
             phoenixweiss/bumpster/bumpster
