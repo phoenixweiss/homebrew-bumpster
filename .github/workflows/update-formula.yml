@@ -305,7 +305,7 @@ jobs:
           brew style phoenixweiss/bumpster/bumpster
           brew audit --strict --online phoenixweiss/bumpster/bumpster
 
-      - name: Open Formula pull request
+      - name: Open Formula pull request and enable auto-merge
         if: ${{ steps.formula.outputs.skip != 'true' }}
         shell: bash
         env:
@@ -329,9 +329,19 @@ jobs:
             printf 'Formula style, and strict online audit were verified before this PR.\n'
           } > "$RUNNER_TEMP/pull-request.md"
 
-          gh pr create \
+          pull_request_url="$(
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --head "$BRANCH" \
+              --title "Update Bumpster to $VERSION" \
+              --body-file "$RUNNER_TEMP/pull-request.md"
+          )"
+
+          printf 'Formula update pull request: %s\n' "$pull_request_url"
+          gh pr merge \
             --repo "$GITHUB_REPOSITORY" \
-            --base main \
-            --head "$BRANCH" \
-            --title "Update Bumpster to $VERSION" \
-            --body-file "$RUNNER_TEMP/pull-request.md"
+            --auto \
+            --squash \
+            --delete-branch \
+            "$pull_request_url"
