@@ -1,8 +1,8 @@
 class Bumpster < Formula
   desc "Release versions with a guarded Git workflow"
   homepage "https://phoenixweiss.github.io/Bumpster/"
-  url "https://github.com/phoenixweiss/Bumpster/releases/download/v1.3.0/bumpster-1.3.0.tar.gz"
-  sha256 "1e1ef3458bf1118fea9097b20f77ddf745b48cb2ea3cde52dadf9ece13c3cf93"
+  url "https://github.com/phoenixweiss/Bumpster/releases/download/v1.4.0/bumpster-1.4.0.tar.gz"
+  sha256 "f3a8dd8b375405dee90a1c8c9052894a2313127205bb56b1bdb2c0c0280017af"
   license "MIT"
 
   def install
